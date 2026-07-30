@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const appPackage = require("../package.json");
 
 const root = path.resolve(__dirname, "..");
 const releaseDir = path.join(root, "release");
@@ -52,7 +53,7 @@ fs.writeFileSync(
     {
       name: "notes",
       productName: "Notes",
-      version: "0.1.0",
+      version: appPackage.version,
       description: "A local-first notes app for desktop and mobile.",
       main: "electron/main.cjs",
     },

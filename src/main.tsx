@@ -9,7 +9,12 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   </React.StrictMode>,
 );
 
-if ("serviceWorker" in navigator && import.meta.env.PROD && window.location.protocol.startsWith("http")) {
+if (
+  "serviceWorker" in navigator &&
+  import.meta.env.PROD &&
+  window.location.protocol.startsWith("http") &&
+  !window.AndroidNotesBridge
+) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").catch(() => undefined);
   });

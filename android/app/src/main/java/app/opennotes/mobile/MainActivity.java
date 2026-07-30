@@ -6,6 +6,7 @@ import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.AssetManager;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Color;
@@ -20,6 +21,7 @@ import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -27,15 +29,20 @@ import android.webkit.WebViewClient;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
+    private static final String APP_HOST = "appassets.androidplatform.net";
+    private static final String APP_URL = "https://" + APP_HOST + "/index.html";
     private static final int PICK_SYNC_FOLDER = 4101;
     private static final int PICK_ATTACHMENT = 4102;
     private static final int REQUEST_MICROPHONE = 4103;
@@ -61,19 +68,28 @@ public class MainActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
-        settings.setAllowFileAccess(true);
+        settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
         notesBridge = new NotesAndroidBridge();
         webView.addJavascriptInterface(notesBridge, "AndroidNotesBridge");
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public WebResourceResponse shouldInterceptRequest(
+                    WebView view,
+                    WebResourceRequest request
+            ) {
+                return openBundledAsset(request.getUrl());
+            }
+
+            @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
-                if ("file".equals(uri.getScheme())) return false;
+                if (isBundledAppUrl(uri)) return false;
                 Intent external = new Intent(Intent.ACTION_VIEW, uri);
                 try {
                     startActivity(external);
@@ -126,7 +142,7 @@ public class MainActivity extends Activity {
         });
 
         setContentView(webView);
-        webView.loadUrl("file:///android_asset/index.html");
+        webView.loadUrl(APP_URL);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
@@ -134,6 +150,61 @@ public class MainActivity extends Activity {
                     this::handleBackNavigation
             );
         }
+    }
+
+    private boolean isBundledAppUrl(Uri uri) {
+        return "https".equals(uri.getScheme()) && APP_HOST.equals(uri.getHost());
+    }
+
+    private WebResourceResponse openBundledAsset(Uri uri) {
+        if (!isBundledAppUrl(uri)) return null;
+
+        String path = Uri.decode(uri.getPath() == null ? "" : uri.getPath());
+        String assetPath = path.startsWith("/") ? path.substring(1) : path;
+        if (assetPath.isEmpty()) assetPath = "index.html";
+        if (assetPath.contains("..") || assetPath.startsWith("/")) {
+            return notFoundResponse();
+        }
+
+        try {
+            InputStream input = getAssets().open(assetPath, AssetManager.ACCESS_STREAMING);
+            String mimeType = mimeTypeFor(assetPath);
+            String encoding = isTextMimeType(mimeType) ? StandardCharsets.UTF_8.name() : null;
+            return new WebResourceResponse(mimeType, encoding, input);
+        } catch (Exception ignored) {
+            return notFoundResponse();
+        }
+    }
+
+    private String mimeTypeFor(String assetPath) {
+        String lowerPath = assetPath.toLowerCase();
+        if (lowerPath.endsWith(".js")) return "application/javascript";
+        if (lowerPath.endsWith(".css")) return "text/css";
+        if (lowerPath.endsWith(".html")) return "text/html";
+        if (lowerPath.endsWith(".json")) return "application/json";
+        if (lowerPath.endsWith(".webmanifest")) return "application/manifest+json";
+        if (lowerPath.endsWith(".svg")) return "image/svg+xml";
+        if (lowerPath.endsWith(".ico")) return "image/x-icon";
+        String detected = URLConnection.guessContentTypeFromName(assetPath);
+        return detected == null ? "application/octet-stream" : detected;
+    }
+
+    private boolean isTextMimeType(String mimeType) {
+        return mimeType.startsWith("text/")
+                || mimeType.contains("javascript")
+                || mimeType.contains("json")
+                || mimeType.contains("svg");
+    }
+
+    private WebResourceResponse notFoundResponse() {
+        return new WebResourceResponse(
+                "text/plain",
+                StandardCharsets.UTF_8.name(),
+                404,
+                "Not Found",
+                Collections.emptyMap(),
+                new ByteArrayInputStream("Not Found".getBytes(StandardCharsets.UTF_8))
+        );
     }
 
     @Override
