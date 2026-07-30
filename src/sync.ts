@@ -45,6 +45,9 @@ declare global {
       listSyncFiles(requestId: string): void;
       readSyncFile(requestId: string, filename: string): void;
       writeSyncFile(requestId: string, filename: string, contents: string): void;
+      shareText(requestId: string, title: string, contents: string): void;
+      shareImage(requestId: string, title: string, dataUrl: string): void;
+      saveImage(requestId: string, filename: string, dataUrl: string): void;
     };
   }
 }
@@ -102,6 +105,48 @@ export const getSyncBridge = (): SyncBridge | null => {
   if (window.openNotesDesktop?.chooseSyncFolder) return window.openNotesDesktop;
   if (window.AndroidNotesBridge) return androidBridge();
   return null;
+};
+
+export const shareNativeText = async (title: string, contents: string) => {
+  if (window.AndroidNotesBridge?.shareText) {
+    await nativeRequest<void>("shareText", title, contents);
+    return;
+  }
+  if (navigator.share) {
+    await navigator.share({ title, text: contents });
+    return;
+  }
+  await navigator.clipboard.writeText(contents);
+};
+
+const dataUrlFile = async (dataUrl: string, filename: string) => {
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  return new File([blob], filename, { type: "image/png" });
+};
+
+export const shareNativeImage = async (title: string, dataUrl: string) => {
+  if (window.AndroidNotesBridge?.shareImage) {
+    await nativeRequest<void>("shareImage", title, dataUrl);
+    return;
+  }
+  const file = await dataUrlFile(dataUrl, `${title.replace(/[^\w.-]+/g, "-")}.png`);
+  if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+    await navigator.share({ title, files: [file] });
+    return;
+  }
+  throw new Error("Image sharing is not available on this device.");
+};
+
+export const saveNativeImage = async (filename: string, dataUrl: string) => {
+  if (window.AndroidNotesBridge?.saveImage) {
+    await nativeRequest<void>("saveImage", filename, dataUrl);
+    return;
+  }
+  const anchor = document.createElement("a");
+  anchor.href = dataUrl;
+  anchor.download = filename;
+  anchor.click();
 };
 
 const newestTimestamp = (first?: string, second?: string) => {

@@ -144,7 +144,7 @@ export const seedData = async () => {
     favorite: false,
     locked: false,
     pageTemplate: "lined",
-    pageStyle: "infinite",
+    pageStyle: "pages",
     pageColor: "#f7f3e8",
     pages: [
       {
@@ -298,7 +298,7 @@ export const createNote = (folderId = DEFAULT_FOLDER_ID): Note => {
     favorite: false,
     locked: false,
     pageTemplate: "lined",
-    pageStyle: "infinite",
+    pageStyle: "pages",
     pageColor: "#f7f3e8",
     pages: [
       {

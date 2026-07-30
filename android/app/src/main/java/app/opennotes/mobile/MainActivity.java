@@ -4,6 +4,7 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.AssetManager;
@@ -14,7 +15,9 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.DocumentsContract;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.util.Base64;
 import android.view.View;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
@@ -397,6 +400,48 @@ public class MainActivity extends Activity {
             }
         }
 
+        private byte[] decodeImageDataUrl(String dataUrl) {
+            int comma = dataUrl.indexOf(',');
+            String encoded = comma >= 0 ? dataUrl.substring(comma + 1) : dataUrl;
+            return Base64.decode(encoded, Base64.DEFAULT);
+        }
+
+        private Uri savePng(String requestedFilename, String dataUrl) throws Exception {
+            String filename = requestedFilename
+                    .replaceAll("[\\\\/:*?\"<>|]+", "-")
+                    .replaceAll("\\s+", " ")
+                    .trim();
+            if (filename.isEmpty()) filename = "Notes-page.png";
+            if (!filename.toLowerCase().endsWith(".png")) filename += ".png";
+
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.Images.Media.DISPLAY_NAME, filename);
+            values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Notes");
+                values.put(MediaStore.Images.Media.IS_PENDING, 1);
+            }
+
+            ContentResolver resolver = getContentResolver();
+            Uri uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) throw new IllegalStateException("Could not create the page image.");
+            try (OutputStream output = resolver.openOutputStream(uri, "w")) {
+                if (output == null) throw new IllegalStateException("Could not save the page image.");
+                output.write(decodeImageDataUrl(dataUrl));
+                output.flush();
+            } catch (Exception error) {
+                resolver.delete(uri, null, null);
+                throw error;
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ContentValues ready = new ContentValues();
+                ready.put(MediaStore.Images.Media.IS_PENDING, 0);
+                resolver.update(uri, ready, null, null);
+            }
+            return uri;
+        }
+
         private void sendResult(String requestId, boolean ok, Object value, String error) {
             try {
                 JSONObject detail = new JSONObject();
@@ -513,6 +558,58 @@ public class MainActivity extends Activity {
                     Uri treeUri = getTreeUri();
                     if (treeUri == null) throw new IllegalStateException("Choose a cloud folder first.");
                     writeText(treeUri, filename, contents);
+                    sendResult(requestId, true, null, null);
+                } catch (Exception error) {
+                    sendError(requestId, error);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void shareText(String requestId, String title, String contents) {
+            runOnUiThread(() -> {
+                try {
+                    Intent share = new Intent(Intent.ACTION_SEND);
+                    share.setType("text/plain");
+                    share.putExtra(Intent.EXTRA_SUBJECT, title);
+                    share.putExtra(Intent.EXTRA_TEXT, contents);
+                    startActivity(Intent.createChooser(share, "Share note"));
+                    sendResult(requestId, true, null, null);
+                } catch (Exception error) {
+                    sendError(requestId, error);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void shareImage(String requestId, String title, String dataUrl) {
+            executor.execute(() -> {
+                try {
+                    Uri image = savePng(title + ".png", dataUrl);
+                    runOnUiThread(() -> {
+                        try {
+                            Intent share = new Intent(Intent.ACTION_SEND);
+                            share.setType("image/png");
+                            share.putExtra(Intent.EXTRA_SUBJECT, title);
+                            share.putExtra(Intent.EXTRA_STREAM, image);
+                            share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                            startActivity(Intent.createChooser(share, "Share page"));
+                            sendResult(requestId, true, null, null);
+                        } catch (Exception error) {
+                            sendError(requestId, error);
+                        }
+                    });
+                } catch (Exception error) {
+                    sendError(requestId, error);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void saveImage(String requestId, String filename, String dataUrl) {
+            executor.execute(() -> {
+                try {
+                    savePng(filename, dataUrl);
                     sendResult(requestId, true, null, null);
                 } catch (Exception error) {
                     sendError(requestId, error);

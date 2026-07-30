@@ -53,25 +53,6 @@ const toCanvasPoints = (
   return smoothCenterLine(distinct);
 };
 
-const curveThrough = (
-  context: CanvasRenderingContext2D,
-  points: Array<{ x: number; y: number }>,
-) => {
-  if (points.length < 2) return;
-  for (let index = 1; index < points.length - 1; index += 1) {
-    const point = points[index];
-    const next = points[index + 1];
-    context.quadraticCurveTo(
-      point.x,
-      point.y,
-      (point.x + next.x) / 2,
-      (point.y + next.y) / 2,
-    );
-  }
-  const last = points[points.length - 1];
-  context.lineTo(last.x, last.y);
-};
-
 const drawStroke = (
   context: CanvasRenderingContext2D,
   stroke: DrawingStroke,
@@ -87,8 +68,11 @@ const drawStroke = (
       : stroke.width * (0.5 + clamp(point.pressure, 0.08, 1) * 0.82);
 
   context.save();
+  context.strokeStyle = stroke.color;
   context.fillStyle = stroke.color;
   context.globalAlpha = stroke.tool === "marker" ? 0.32 : 1;
+  context.lineCap = "round";
+  context.lineJoin = "round";
 
   if (points.length === 1) {
     const radius = Math.max(0.65, widthAt(points[0]) / 2);
@@ -99,49 +83,15 @@ const drawStroke = (
     return;
   }
 
-  const normals = points.map((point, index) => {
-    const previous = points[Math.max(0, index - 1)];
-    const next = points[Math.min(points.length - 1, index + 1)];
-    const tangentX = next.x - previous.x;
-    const tangentY = next.y - previous.y;
-    const length = Math.hypot(tangentX, tangentY) || 1;
-    return { x: -tangentY / length, y: tangentX / length };
-  });
-
-  const radii = points.map((point) => Math.max(0.65, widthAt(point) / 2));
-  const left = points.map((point, index) => ({
-    x: point.x + normals[index].x * radii[index],
-    y: point.y + normals[index].y * radii[index],
-  }));
-  const right = points.map((point, index) => ({
-    x: point.x - normals[index].x * radii[index],
-    y: point.y - normals[index].y * radii[index],
-  }));
-
-  const lastIndex = points.length - 1;
-  const endNormalAngle = Math.atan2(normals[lastIndex].y, normals[lastIndex].x);
-  const startRightAngle = Math.atan2(-normals[0].y, -normals[0].x);
-
-  context.beginPath();
-  context.moveTo(left[0].x, left[0].y);
-  curveThrough(context, left);
-  context.arc(
-    points[lastIndex].x,
-    points[lastIndex].y,
-    radii[lastIndex],
-    endNormalAngle,
-    endNormalAngle + Math.PI,
-  );
-  curveThrough(context, [...right].reverse());
-  context.arc(
-    points[0].x,
-    points[0].y,
-    radii[0],
-    startRightAngle,
-    startRightAngle + Math.PI,
-  );
-  context.closePath();
-  context.fill();
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const point = points[index];
+    context.lineWidth = Math.max(1.3, (widthAt(previous) + widthAt(point)) / 2);
+    context.beginPath();
+    context.moveTo(previous.x, previous.y);
+    context.lineTo(point.x, point.y);
+    context.stroke();
+  }
   context.restore();
 };
 

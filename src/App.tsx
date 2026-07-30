@@ -2,11 +2,13 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import {
   Archive,
+  BookOpen,
   Bold,
   Check,
   ChevronLeft,
   ChevronRight,
   CircleStop,
+  Copy,
   Download,
   Eraser,
   FileAudio,
@@ -17,6 +19,7 @@ import {
   Hand,
   Highlighter,
   Image as ImageIcon,
+  ImageDown,
   Italic,
   Keyboard,
   LayoutGrid,
@@ -43,6 +46,8 @@ import {
   Type,
   Upload,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import {
   type ChangeEvent,
@@ -77,6 +82,9 @@ import {
   chooseSyncFolder as openSyncFolderPicker,
   getConfiguredSyncFolder,
   getSyncBridge,
+  saveNativeImage,
+  shareNativeImage,
+  shareNativeText,
   syncNow,
 } from "./sync";
 import type {
@@ -302,6 +310,29 @@ type PointerSample = {
   pageId?: string;
 };
 
+type EditorTouchGesture =
+  | {
+      mode: "pan";
+      pointerId: number;
+      startX: number;
+      startY: number;
+      scrollLeft: number;
+      scrollTop: number;
+      active: boolean;
+    }
+  | {
+      mode: "pull";
+      pointerId: number;
+      startX: number;
+      startY: number;
+      active: boolean;
+    }
+  | {
+      mode: "pinch";
+      startDistance: number;
+      startZoom: number;
+    };
+
 function App() {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
@@ -354,6 +385,10 @@ function App() {
   const [drawWithTouch, setDrawWithTouch] = useState(false);
   const [activeStroke, setActiveStroke] = useState<DrawingStroke | null>(null);
   const [isEditorMenuOpen, setIsEditorMenuOpen] = useState(false);
+  const [isPageManagerOpen, setIsPageManagerOpen] = useState(false);
+  const [openPageMenuId, setOpenPageMenuId] = useState<string | null>(null);
+  const [editorZoom, setEditorZoom] = useState(1);
+  const [pagePullProgress, setPagePullProgress] = useState(0);
   const [editorSwipeOffset, setEditorSwipeOffset] = useState(0);
   const [unlockedNoteIds, setUnlockedNoteIds] = useState<string[]>([]);
   const [unlockInput, setUnlockInput] = useState("");
@@ -388,6 +423,9 @@ function App() {
   const suppressNoteClickRef = useRef(false);
   const editorSwipeRef = useRef<{ pointerId: number; startX: number; startY: number } | null>(null);
   const editorSwipeOffsetRef = useRef(0);
+  const editorTouchPointsRef = useRef(new Map<number, { x: number; y: number }>());
+  const editorTouchGestureRef = useRef<EditorTouchGesture | null>(null);
+  const pagePullProgressRef = useRef(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<BlobPart[]>([]);
   const launchTimerRef = useRef<number | null>(null);
@@ -504,6 +542,39 @@ function App() {
       setStatus("Saving...");
     },
   });
+
+  const selectEditorTool = (tool: "type" | "pen" | "marker" | "eraser") => {
+    setActiveTool(tool);
+    if (tool === "type") {
+      editor?.setEditable(true);
+      return;
+    }
+
+    editor?.setEditable(false);
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement) focused.blur();
+    window.getSelection()?.removeAllRanges();
+  };
+
+  useEffect(() => {
+    editor?.setEditable(activeTool === "type");
+    if (activeTool !== "type") {
+      const focused = document.activeElement;
+      if (focused instanceof HTMLTextAreaElement || focused instanceof HTMLInputElement) {
+        focused.blur();
+      }
+    }
+  }, [activeTool, editor]);
+
+  useEffect(() => {
+    setIsPageManagerOpen(false);
+    setOpenPageMenuId(null);
+    setPagePullProgress(0);
+    pagePullProgressRef.current = 0;
+    setEditorZoom(1);
+    editorTouchPointsRef.current.clear();
+    editorTouchGestureRef.current = null;
+  }, [selectedNoteId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -890,6 +961,443 @@ function App() {
         );
       }
     }
+  };
+
+  const pageStrokes = (note: Note, page: NotePage, pageIndex: number) =>
+    note.strokes.filter(
+      (stroke) => stroke.pageId === page.id || (!stroke.pageId && pageIndex === 0),
+    );
+
+  const commitPageStructure = (
+    nextPages: NotePage[],
+    nextStrokes = selectedNote?.strokes ?? [],
+    nextStatus = "Saving...",
+  ) => {
+    if (!selectedNote || !nextPages.length) return;
+    const plainText = mergePageText(nextPages);
+    updateNoteById(
+      selectedNote.id,
+      {
+        pages: nextPages,
+        strokes: nextStrokes,
+        plainText,
+        contentHtml: nextPages.map((page) => page.contentHtml).join("") || "<p></p>",
+      },
+      nextStatus,
+    );
+    setEditorPageCount(nextPages.length);
+  };
+
+  const scrollToEditorPage = (pageIndex: number) => {
+    window.requestAnimationFrame(() => {
+      const page = paperSpreadRef.current?.querySelectorAll<HTMLElement>(".paper-page")[pageIndex];
+      page?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+      setCurrentEditorPage(pageIndex + 1);
+    });
+  };
+
+  const insertPageAfter = (pageIndex: number) => {
+    if (!selectedNote) return;
+    if (selectedNote.pageStyle !== "pages") {
+      updateNoteById(selectedNote.id, {
+        pageStyle: "pages",
+        pages: getNotePages(selectedNote),
+      });
+    }
+    const pages = getNotePages(selectedNote);
+    const reference = pages[Math.min(pageIndex, pages.length - 1)];
+    const page: NotePage = {
+      id: makeId("page"),
+      contentHtml: "<p></p>",
+      plainText: "",
+      pageTemplate: reference?.pageTemplate ?? selectedNote.pageTemplate,
+      pageColor: reference?.pageColor ?? selectedNote.pageColor,
+    };
+    const insertionIndex = Math.min(pages.length, Math.max(0, pageIndex + 1));
+    commitPageStructure(
+      [...pages.slice(0, insertionIndex), page, ...pages.slice(insertionIndex)],
+      selectedNote.strokes,
+      "Page added",
+    );
+    setOpenPageMenuId(null);
+    scrollToEditorPage(insertionIndex);
+  };
+
+  const movePage = (pageIndex: number, direction: -1 | 1) => {
+    if (!selectedNote) return;
+    const pages = getNotePages(selectedNote);
+    const targetIndex = pageIndex + direction;
+    if (targetIndex < 0 || targetIndex >= pages.length) return;
+    const nextPages = [...pages];
+    [nextPages[pageIndex], nextPages[targetIndex]] = [
+      nextPages[targetIndex],
+      nextPages[pageIndex],
+    ];
+    commitPageStructure(nextPages, selectedNote.strokes, "Pages reordered");
+    setOpenPageMenuId(null);
+    scrollToEditorPage(targetIndex);
+  };
+
+  const duplicatePage = (pageIndex: number) => {
+    if (!selectedNote) return;
+    const pages = getNotePages(selectedNote);
+    const source = pages[pageIndex];
+    if (!source) return;
+    const copy: NotePage = { ...source, id: makeId("page") };
+    const copiedStrokes = pageStrokes(selectedNote, source, pageIndex).map((stroke) => ({
+      ...stroke,
+      id: makeId("stroke"),
+      pageId: copy.id,
+      points: stroke.points.map((point) => ({ ...point })),
+      createdAt: new Date().toISOString(),
+    }));
+    commitPageStructure(
+      [...pages.slice(0, pageIndex + 1), copy, ...pages.slice(pageIndex + 1)],
+      [...selectedNote.strokes, ...copiedStrokes],
+      "Page duplicated",
+    );
+    setOpenPageMenuId(null);
+    scrollToEditorPage(pageIndex + 1);
+  };
+
+  const erasePage = (pageIndex: number) => {
+    if (!selectedNote) return;
+    const pages = getNotePages(selectedNote);
+    const page = pages[pageIndex];
+    if (!page) return;
+    const nextPages = pages.map((item, index) =>
+      index === pageIndex
+        ? { ...item, plainText: "", contentHtml: "<p></p>" }
+        : item,
+    );
+    const nextStrokes = selectedNote.strokes.filter(
+      (stroke) => stroke.pageId !== page.id && !(!stroke.pageId && pageIndex === 0),
+    );
+    commitPageStructure(nextPages, nextStrokes, "Page erased");
+    setOpenPageMenuId(null);
+  };
+
+  const deletePage = (pageIndex: number) => {
+    if (!selectedNote) return;
+    const pages = getNotePages(selectedNote);
+    if (pages.length === 1) {
+      erasePage(0);
+      return;
+    }
+    const page = pages[pageIndex];
+    if (!page) return;
+    const nextPages = pages.filter((_, index) => index !== pageIndex);
+    const nextStrokes = selectedNote.strokes.filter(
+      (stroke) => stroke.pageId !== page.id && !(!stroke.pageId && pageIndex === 0),
+    );
+    commitPageStructure(nextPages, nextStrokes, "Page deleted");
+    setOpenPageMenuId(null);
+    scrollToEditorPage(Math.max(0, pageIndex - 1));
+  };
+
+  const copyPage = async (pageIndex: number) => {
+    if (!selectedNote) return;
+    const page = getNotePages(selectedNote)[pageIndex];
+    if (!page) return;
+    try {
+      await navigator.clipboard.writeText(page.plainText);
+      setStatus("Page copied");
+    } catch {
+      setStatus("Clipboard unavailable");
+    }
+    setOpenPageMenuId(null);
+  };
+
+  const renderPagePng = (page: NotePage, pageIndex: number) => {
+    if (!selectedNote) return "";
+    const width = 1240;
+    const height = 1600;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return "";
+
+    context.fillStyle = page.pageColor;
+    context.fillRect(0, 0, width, height);
+    context.lineWidth = 1;
+    if (page.pageTemplate === "lined") {
+      context.strokeStyle = "rgba(69,92,124,0.22)";
+      for (let y = 92; y < height; y += 38) {
+        context.beginPath();
+        context.moveTo(0, y);
+        context.lineTo(width, y);
+        context.stroke();
+      }
+      context.strokeStyle = "rgba(210,72,72,0.46)";
+      context.beginPath();
+      context.moveTo(150, 0);
+      context.lineTo(150, height);
+      context.stroke();
+    } else if (page.pageTemplate === "grid") {
+      context.strokeStyle = "rgba(63,87,120,0.16)";
+      for (let x = 0; x < width; x += 38) {
+        context.beginPath();
+        context.moveTo(x, 0);
+        context.lineTo(x, height);
+        context.stroke();
+      }
+      for (let y = 0; y < height; y += 38) {
+        context.beginPath();
+        context.moveTo(0, y);
+        context.lineTo(width, y);
+        context.stroke();
+      }
+    } else if (page.pageTemplate === "dots") {
+      context.fillStyle = "rgba(43,61,87,0.3)";
+      for (let x = 28; x < width; x += 34) {
+        for (let y = 28; y < height; y += 34) {
+          context.beginPath();
+          context.arc(x, y, 1.6, 0, Math.PI * 2);
+          context.fill();
+        }
+      }
+    }
+
+    context.fillStyle = "#202124";
+    context.font = "28px sans-serif";
+    context.textBaseline = "top";
+    const left = page.pageTemplate === "lined" ? 182 : 88;
+    const maxTextWidth = width - left - 88;
+    let textY = 76;
+    for (const paragraph of page.plainText.split("\n")) {
+      const words = paragraph.split(/\s+/);
+      let line = "";
+      if (!paragraph) textY += 38;
+      for (const word of words) {
+        const candidate = line ? `${line} ${word}` : word;
+        if (line && context.measureText(candidate).width > maxTextWidth) {
+          context.fillText(line, left, textY);
+          line = word;
+          textY += 38;
+        } else {
+          line = candidate;
+        }
+      }
+      if (line) context.fillText(line, left, textY);
+      textY += 38;
+    }
+
+    for (const stroke of pageStrokes(selectedNote, page, pageIndex)) {
+      if (!stroke.points.length) continue;
+      context.save();
+      context.strokeStyle = stroke.color;
+      context.fillStyle = stroke.color;
+      context.globalAlpha = stroke.tool === "marker" ? 0.32 : 1;
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      const first = stroke.points[0];
+      if (stroke.points.length === 1) {
+        context.beginPath();
+        context.arc((first.x / 100) * width, (first.y / 100) * height, stroke.width / 2, 0, Math.PI * 2);
+        context.fill();
+      } else {
+        for (let index = 1; index < stroke.points.length; index += 1) {
+          const previous = stroke.points[index - 1];
+          const point = stroke.points[index];
+          const pressure = stroke.tool === "marker" ? 1 : ((previous.pressure ?? 0.5) + (point.pressure ?? 0.5)) / 2;
+          context.lineWidth = Math.max(1.3, stroke.width * (stroke.tool === "marker" ? 1 : 0.5 + pressure * 0.82));
+          context.beginPath();
+          context.moveTo((previous.x / 100) * width, (previous.y / 100) * height);
+          context.lineTo((point.x / 100) * width, (point.y / 100) * height);
+          context.stroke();
+        }
+      }
+      context.restore();
+    }
+    return canvas.toDataURL("image/png");
+  };
+
+  const sharePage = async (pageIndex: number) => {
+    if (!selectedNote) return;
+    const page = getNotePages(selectedNote)[pageIndex];
+    if (!page) return;
+    const dataUrl = renderPagePng(page, pageIndex);
+    if (!dataUrl) return;
+    try {
+      await shareNativeImage(`${selectedNote.title} - page ${pageIndex + 1}`, dataUrl);
+      setStatus("Share opened");
+    } catch {
+      setStatus("Could not share page");
+    }
+    setOpenPageMenuId(null);
+  };
+
+  const savePageImage = async (pageIndex: number) => {
+    if (!selectedNote) return;
+    const page = getNotePages(selectedNote)[pageIndex];
+    if (!page) return;
+    const filename = `${safeFilename(selectedNote.title)}-page-${pageIndex + 1}.png`;
+    const dataUrl = renderPagePng(page, pageIndex);
+    if (!dataUrl) return;
+    try {
+      await saveNativeImage(filename, dataUrl);
+      setStatus("Page image saved");
+    } catch {
+      const anchor = document.createElement("a");
+      anchor.href = dataUrl;
+      anchor.download = filename;
+      anchor.click();
+      setStatus("Page image downloaded");
+    }
+    setOpenPageMenuId(null);
+  };
+
+  const handleShareNote = async () => {
+    if (!selectedNote) return;
+    const text = getNotePages(selectedNote)
+      .map((page, index) => `Page ${index + 1}\n${page.plainText}`)
+      .join("\n\n");
+    try {
+      await shareNativeText(selectedNote.title || "Untitled note", text);
+      setStatus("Share opened");
+    } catch {
+      setStatus("Could not share note");
+    }
+  };
+
+  const cancelActiveInk = () => {
+    activePointerIdRef.current = null;
+    activePointerTypeRef.current = "";
+    activeInputToolRef.current = null;
+    activeInkPageIdRef.current = undefined;
+    activeStrokeRef.current = null;
+    eraserPointsRef.current = [];
+    pendingInkRenderRef.current = false;
+    setActiveStroke(null);
+  };
+
+  const setSafeEditorZoom = (value: number) => {
+    setEditorZoom(Math.min(2.5, Math.max(0.45, Math.round(value * 100) / 100)));
+  };
+
+  const handleStagePointerDownCapture = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.pointerType !== "touch") return;
+    const stage = event.currentTarget;
+    const points = editorTouchPointsRef.current;
+    points.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (points.size >= 2) {
+      const [first, second] = [...points.values()];
+      cancelActiveInk();
+      editorTouchGestureRef.current = {
+        mode: "pinch",
+        startDistance: Math.max(1, Math.hypot(first.x - second.x, first.y - second.y)),
+        startZoom: editorZoom,
+      };
+      for (const pointerId of points.keys()) {
+        try {
+          stage.setPointerCapture(pointerId);
+        } catch {
+          // A WebView may have already reassigned the first pointer.
+        }
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    const stageRect = stage.getBoundingClientRect();
+    const atLastPage =
+      selectedNote?.pageStyle === "pages" &&
+      currentEditorPage >= Math.max(1, selectedNotePages.length);
+    const atScrollEnd =
+      stage.scrollLeft >= Math.max(0, stage.scrollWidth - stage.clientWidth - 3);
+    const startsAtRightEdge = event.clientX >= stageRect.right - 74;
+
+    if (atLastPage && atScrollEnd && startsAtRightEdge) {
+      editorTouchGestureRef.current = {
+        mode: "pull",
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        active: false,
+      };
+      return;
+    }
+
+    if (activeTool !== "type" && drawWithTouch) return;
+    editorTouchGestureRef.current = {
+      mode: "pan",
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: stage.scrollLeft,
+      scrollTop: stage.scrollTop,
+      active: false,
+    };
+  };
+
+  const handleStagePointerMoveCapture = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.pointerType !== "touch") return;
+    const points = editorTouchPointsRef.current;
+    if (points.has(event.pointerId)) {
+      points.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+    const gesture = editorTouchGestureRef.current;
+    if (!gesture) return;
+
+    if (gesture.mode === "pinch") {
+      if (points.size < 2) return;
+      const [first, second] = [...points.values()];
+      const distanceNow = Math.max(1, Math.hypot(first.x - second.x, first.y - second.y));
+      setSafeEditorZoom(gesture.startZoom * (distanceNow / gesture.startDistance));
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    if (gesture.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - gesture.startX;
+    const deltaY = event.clientY - gesture.startY;
+    if (!gesture.active && Math.hypot(deltaX, deltaY) < 5) return;
+    gesture.active = true;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is an optimization; scrolling still works without it.
+    }
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (gesture.mode === "pull") {
+      const progress = Math.min(1, Math.max(0, -deltaX / 118));
+      pagePullProgressRef.current = progress;
+      setPagePullProgress(progress);
+      return;
+    }
+
+    event.currentTarget.scrollLeft = gesture.scrollLeft - deltaX;
+    event.currentTarget.scrollTop = gesture.scrollTop - deltaY;
+  };
+
+  const finishStageTouch = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.pointerType !== "touch") return;
+    const gesture = editorTouchGestureRef.current;
+    const shouldAddPage =
+      gesture?.mode === "pull" &&
+      gesture.pointerId === event.pointerId &&
+      pagePullProgressRef.current >= 0.72;
+
+    editorTouchPointsRef.current.delete(event.pointerId);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (gesture?.mode === "pinch" && editorTouchPointsRef.current.size > 0) {
+      editorTouchGestureRef.current = null;
+    } else if (gesture?.mode !== "pinch" || editorTouchPointsRef.current.size === 0) {
+      editorTouchGestureRef.current = null;
+    }
+
+    setPagePullProgress(0);
+    pagePullProgressRef.current = 0;
+    if (shouldAddPage) insertPageAfter(Math.max(0, selectedNotePages.length - 1));
   };
 
   useEffect(() => {
@@ -1779,6 +2287,7 @@ function App() {
 
   const handleInkPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!selectedNote || !selectedNoteUnlocked || activePointerIdRef.current !== null) return;
+    if (activeTool === "type") return;
 
     const isPen = event.pointerType === "pen";
     const isRecentPenPalm =
@@ -1793,18 +2302,13 @@ function App() {
     const inputTool =
       isStylusEraser
         ? "eraser"
-        : activeTool === "type" && isPen
-          ? "pen"
-          : activeTool === "type"
-            ? null
-            : activeTool;
+        : activeTool;
 
-    if (!inputTool || (event.pointerType === "touch" && !drawWithTouch)) return;
+    if (event.pointerType === "touch" && !drawWithTouch) return;
 
     event.preventDefault();
     if (isPen) {
       lastPenInputAtRef.current = performance.now();
-      if (activeTool === "type") setActiveTool("pen");
     }
 
     activePointerIdRef.current = event.pointerId;
@@ -2153,6 +2657,7 @@ function App() {
     const paperStyle = {
       backgroundColor: selectedNote.pageColor,
       "--page-count": visiblePageCount,
+      zoom: editorZoom,
     } as CSSProperties;
     const launchStyle = launchRect
       ? ({
@@ -2191,47 +2696,40 @@ function App() {
           <input
             className="note-title-inline"
             value={locked ? "Locked note" : draftTitle}
-            readOnly={locked}
+            readOnly={locked || activeTool !== "type"}
             onChange={(event) => handleTitleChange(event.target.value)}
             aria-label="Note title"
           />
           <div className="note-top-actions">
             <button
-              className={selectedNote.favorite ? "desktop-note-action is-active" : "desktop-note-action"}
+              className={isPageManagerOpen ? "is-active" : ""}
               type="button"
-              onClick={() => updateNoteById(selectedNote.id, { favorite: !selectedNote.favorite })}
-              aria-label="Favorite note"
+              onClick={() => {
+                if (!isPagedNote) {
+                  updateNoteById(selectedNote.id, {
+                    pageStyle: "pages",
+                    pages: getNotePages(selectedNote),
+                  });
+                }
+                setIsPageManagerOpen((value) => !value);
+                setOpenPageMenuId(null);
+              }}
+              aria-label="Page manager"
+              aria-pressed={isPageManagerOpen}
             >
-              <Star size={21} />
+              <BookOpen size={21} />
             </button>
             <button
-              className={selectedNote.pinned ? "desktop-note-action is-active" : "desktop-note-action"}
               type="button"
-              onClick={() => updateNoteById(selectedNote.id, { pinned: !selectedNote.pinned })}
-              aria-label="Pin note"
+              onClick={() => insertPageAfter(renderedPages.length - 1)}
+              aria-label="Add page"
             >
-              <Pin size={21} />
+              <Plus size={23} />
             </button>
-            <button className="desktop-note-action" type="button" onClick={handleToggleLock} aria-label="Lock note">
-              <Lock size={21} />
-            </button>
-            <button className="desktop-note-action" type="button" onClick={handleDuplicateNote} aria-label="Duplicate note">
+            <button type="button" onClick={() => void handleShareNote()} aria-label="Share note">
               <Share2 size={21} />
             </button>
-            {selectedNote.archived ? (
-              <button className="desktop-note-action" type="button" onClick={handleDeleteNote} aria-label="Delete permanently">
-                <Trash2 size={21} />
-              </button>
-            ) : (
-              <button className="desktop-note-action" type="button" onClick={handleToggleArchive} aria-label="Move to trash">
-                <Archive size={21} />
-              </button>
-            )}
-            <button className="desktop-note-action" type="button" onClick={handleCreateNote} aria-label="New note">
-              <Plus size={24} />
-            </button>
             <button
-              className="mobile-note-more"
               type="button"
               onClick={() => setIsEditorMenuOpen(true)}
               aria-label="Note actions"
@@ -2289,7 +2787,7 @@ function App() {
                   setIsEditorMenuOpen(false);
                 }}
               >
-                <Share2 size={21} />
+                <Copy size={21} />
                 Duplicate note
               </button>
               <button
@@ -2303,7 +2801,7 @@ function App() {
                   setIsEditorMenuOpen(false);
                 }}
               >
-                {selectedNote.archived ? <Trash2 size={21} /> : <Archive size={21} />}
+                <Trash2 size={21} />
                 {selectedNote.archived ? "Delete permanently" : "Move to trash"}
               </button>
               <button
@@ -2321,6 +2819,133 @@ function App() {
               </button>
             </section>
           </div>
+        )}
+
+        {isPageManagerOpen && isPagedNote && !locked && (
+          <>
+            <button
+              className="page-manager-backdrop"
+              type="button"
+              onClick={() => {
+                setIsPageManagerOpen(false);
+                setOpenPageMenuId(null);
+              }}
+              aria-label="Close page manager"
+            />
+            <aside className="page-manager" aria-label="Page manager">
+              <header className="page-manager-header">
+                <div>
+                  <strong>Pages</strong>
+                  <span>
+                    {currentEditorPage} / {renderedPages.length}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPageManagerOpen(false);
+                    setOpenPageMenuId(null);
+                  }}
+                  aria-label="Close page manager"
+                >
+                  <X size={20} />
+                </button>
+              </header>
+              <div className="page-manager-list">
+                {renderedPages.map((page, pageIndex) => (
+                  <article
+                    className={
+                      currentEditorPage === pageIndex + 1
+                        ? "page-manager-item is-current"
+                        : "page-manager-item"
+                    }
+                    key={page.id}
+                  >
+                    <button
+                      className={`page-thumbnail template-${page.pageTemplate}`}
+                      type="button"
+                      style={{ backgroundColor: page.pageColor }}
+                      onClick={() => scrollToEditorPage(pageIndex)}
+                      aria-label={`Go to page ${pageIndex + 1}`}
+                    >
+                      <span>{page.plainText || " "}</span>
+                    </button>
+                    <footer>
+                      <span>{pageIndex + 1}</span>
+                      <div className="page-reorder-buttons">
+                        <button
+                          type="button"
+                          disabled={pageIndex === 0}
+                          onClick={() => movePage(pageIndex, -1)}
+                          aria-label={`Move page ${pageIndex + 1} left`}
+                        >
+                          <ChevronLeft size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={pageIndex === renderedPages.length - 1}
+                          onClick={() => movePage(pageIndex, 1)}
+                          aria-label={`Move page ${pageIndex + 1} right`}
+                        >
+                          <ChevronRight size={16} />
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenPageMenuId((value) => (value === page.id ? null : page.id))
+                        }
+                        aria-label={`Page ${pageIndex + 1} actions`}
+                        aria-expanded={openPageMenuId === page.id}
+                      >
+                        <MoreVertical size={18} />
+                      </button>
+                    </footer>
+                    {openPageMenuId === page.id && (
+                      <div className="page-action-menu">
+                        <button type="button" onClick={() => insertPageAfter(pageIndex)}>
+                          <Plus size={17} />
+                          Add page after
+                        </button>
+                        <button type="button" onClick={() => void copyPage(pageIndex)}>
+                          <Copy size={17} />
+                          Copy page
+                        </button>
+                        <button type="button" onClick={() => duplicatePage(pageIndex)}>
+                          <Copy size={17} />
+                          Duplicate page
+                        </button>
+                        <button type="button" onClick={() => erasePage(pageIndex)}>
+                          <Eraser size={17} />
+                          Erase page
+                        </button>
+                        <button type="button" onClick={() => void sharePage(pageIndex)}>
+                          <Share2 size={17} />
+                          Share page
+                        </button>
+                        <button type="button" onClick={() => void savePageImage(pageIndex)}>
+                          <ImageDown size={17} />
+                          Save as image
+                        </button>
+                        <button className="is-danger" type="button" onClick={() => deletePage(pageIndex)}>
+                          <Trash2 size={17} />
+                          Delete page
+                        </button>
+                      </div>
+                    )}
+                  </article>
+                ))}
+                <button
+                  className="page-add-thumbnail"
+                  type="button"
+                  onClick={() => insertPageAfter(renderedPages.length - 1)}
+                >
+                  <Plus size={26} />
+                  <span>Add page</span>
+                </button>
+              </div>
+            </aside>
+          </>
         )}
 
         {locked ? (
@@ -2349,15 +2974,15 @@ function App() {
                 <button
                   className={activeTool === "type" ? "selected" : ""}
                   type="button"
-                  onClick={() => setActiveTool("type")}
-                  aria-label="Typing"
+                  onClick={() => selectEditorTool("type")}
+                  aria-label="Keyboard mode"
                 >
                   <Keyboard size={18} />
                 </button>
                 <button
                   className={activeTool === "pen" ? "selected" : ""}
                   type="button"
-                  onClick={() => setActiveTool("pen")}
+                  onClick={() => selectEditorTool("pen")}
                   aria-label="Pen"
                 >
                   <PenLine size={20} />
@@ -2365,7 +2990,7 @@ function App() {
                 <button
                   className={activeTool === "marker" ? "selected" : ""}
                   type="button"
-                  onClick={() => setActiveTool("marker")}
+                  onClick={() => selectEditorTool("marker")}
                   aria-label="Highlighter"
                 >
                   <Highlighter size={19} />
@@ -2373,7 +2998,7 @@ function App() {
                 <button
                   className={activeTool === "eraser" ? "selected" : ""}
                   type="button"
-                  onClick={() => setActiveTool("eraser")}
+                  onClick={() => selectEditorTool("eraser")}
                   aria-label="Eraser"
                 >
                   <Eraser size={19} />
@@ -2382,15 +3007,20 @@ function App() {
                   className={drawWithTouch ? "touch-input-toggle selected" : "touch-input-toggle"}
                   type="button"
                   onClick={() => setDrawWithTouch((value) => !value)}
+                  disabled={activeTool === "type"}
                   aria-label={drawWithTouch ? "Disable drawing with touch" : "Enable drawing with touch"}
                   aria-pressed={drawWithTouch}
-                  title={drawWithTouch ? "Finger drawing on" : "Palm rejection on"}
+                  title={drawWithTouch ? "Finger drawing on" : "Finger drawing off"}
                 >
                   <Hand size={19} />
                 </button>
               </div>
               <span className="pen-hint">
-                {drawWithTouch ? "Finger drawing on" : "Pen writes · touch pans"}
+                {activeTool === "type"
+                  ? "Keyboard mode"
+                  : drawWithTouch
+                    ? "Finger drawing on"
+                    : "Finger drawing off"}
               </span>
               <span className="tool-divider" />
               {inkColors.map((color) => (
@@ -2518,7 +3148,28 @@ function App() {
               className={`note-paper-stage style-${selectedNote.pageStyle}`}
               onScroll={updateEditorPageMetrics}
               onWheel={handlePaperStageWheel}
+              onPointerDownCapture={handleStagePointerDownCapture}
+              onPointerMoveCapture={handleStagePointerMoveCapture}
+              onPointerUpCapture={finishStageTouch}
+              onPointerCancelCapture={finishStageTouch}
             >
+              <div className="editor-zoom-controls" aria-label="Page zoom">
+                <button
+                  type="button"
+                  onClick={() => setSafeEditorZoom(editorZoom - 0.1)}
+                  aria-label="Zoom out"
+                >
+                  <ZoomOut size={18} />
+                </button>
+                <output>{Math.round(editorZoom * 100)}%</output>
+                <button
+                  type="button"
+                  onClick={() => setSafeEditorZoom(editorZoom + 0.1)}
+                  aria-label="Zoom in"
+                >
+                  <ZoomIn size={18} />
+                </button>
+              </div>
               <div
                 ref={paperSpreadRef}
                 className={`paper-spread template-${selectedNote.pageTemplate} style-${selectedNote.pageStyle}${activeTool === "type" ? "" : " drawing-mode"}${drawWithTouch ? " touch-drawing" : ""}`}
@@ -2609,6 +3260,21 @@ function App() {
                   />
                 )}
               </div>
+              {isPagedNote && pagePullProgress > 0 && (
+                <div
+                  className={pagePullProgress >= 0.72 ? "page-pull-indicator is-ready" : "page-pull-indicator"}
+                  style={{ "--pull-progress": pagePullProgress } as CSSProperties}
+                  aria-live="polite"
+                >
+                  <span className="page-pull-progress">
+                    <i />
+                  </span>
+                  <Plus size={28} />
+                  <strong>
+                    {pagePullProgress >= 0.72 ? "Release to add page" : "Pull to add page"}
+                  </strong>
+                </div>
+              )}
             </main>
           </>
         )}
@@ -2723,7 +3389,6 @@ function App() {
               aria-label="Close navigation"
             />
           )}
-          {(!isCompactLayout || isSidebarOpen) && (
           <aside className={`sidebar ${isSidebarOpen ? "is-open" : ""}`}>
             <div className="brand-row">
               <button
@@ -2781,10 +3446,17 @@ function App() {
               Manage folders
             </button>
           </aside>
-          )}
           <main className="workspace">
             {selectedFolderId === "archive" ? (
               <header className={isTrashEditMode ? "topbar trash-topbar trash-editing" : "topbar trash-topbar"}>
+                <button
+                  className="icon-button rail-open"
+                  type="button"
+                  onClick={() => setIsSidebarOpen(true)}
+                  aria-label="Open navigation"
+                >
+                  <Menu size={21} />
+                </button>
                 <div className="trash-heading">
                   {isTrashEditMode ? (
                     <>
