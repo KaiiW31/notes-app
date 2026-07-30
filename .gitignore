@@ -1,0 +1,17 @@
+node_modules/
+.pnpm-store/
+dist/
+release/
+.DS_Store
+*.local
+*.log
+*.apk
+*.aab
+*.jks
+*.keystore
+coverage/
+.android-build-tools/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties

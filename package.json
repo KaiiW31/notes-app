@@ -1,0 +1,60 @@
+{
+  "name": "notes",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A local-first notes app for desktop and mobile.",
+  "author": "Notes",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "desktop": "pnpm build && electron .",
+    "package:win": "pnpm build && node scripts/package-win-folder.cjs",
+    "package:win:builder": "pnpm build && electron-builder --win portable",
+    "package:android": "pnpm build && node scripts/package-android.cjs"
+  },
+  "dependencies": {
+    "@tiptap/react": "^2.22.3",
+    "@tiptap/starter-kit": "^2.22.3",
+    "idb": "^8.0.3",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  },
+  "build": {
+    "appId": "app.notes.desktop",
+    "productName": "Notes",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "public/icons/notes-icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    }
+  }
+}

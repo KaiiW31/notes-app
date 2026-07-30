@@ -1,0 +1,35 @@
+{
+  "name": "Notes",
+  "short_name": "Notes",
+  "description": "A local-first notes app for desktop and mobile.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#f7f8fa",
+  "theme_color": "#f7f8fa",
+  "categories": ["productivity", "utilities"],
+  "shortcuts": [
+    {
+      "name": "New note",
+      "short_name": "New note",
+      "url": "/?action=new-note",
+      "icons": [
+        {
+          "src": "/icons/notes-icon.png",
+          "sizes": "1024x1024",
+          "type": "image/png"
+        }
+      ]
+    }
+  ],
+  "icons": [
+    {
+      "src": "/icons/notes-icon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
